@@ -10,6 +10,8 @@ This project demonstrates a Model Context Protocol (MCP) server implementation u
   - `stock_quote` - Get real-time stock quotes
   - `company_profile` - Get company information
   - `company_news` - Get recent news articles for a company
+  - `stock_sentiment` - Analyze sentiment and market perception about a stock
+- Natural language interface for querying stock data and analyzing market sentiment
 - Offers example prompts
 - Uses JSON-RPC 2.0 over HTTP for communication
 
@@ -18,6 +20,7 @@ This project demonstrates a Model Context Protocol (MCP) server implementation u
 - Python 3.8+
 - MCP-compatible client (like Postman)
 - Finnhub API key (get one at https://finnhub.io/)
+- OpenAI API key (for natural language processing)
 
 ## Setup
 
@@ -33,9 +36,10 @@ This project demonstrates a Model Context Protocol (MCP) server implementation u
    pip install -r requirements.txt
    ```
 
-3. Create a `.env` file with your Finnhub API key:
+3. Create a `.env` file with your API keys:
    ```
-   FINNHUB_API_KEY=your_api_key_here
+   FINNHUB_API_KEY=your_finnhub_api_key_here
+   OPENAI_API_KEY=your_openai_api_key_here
    ```
 
 ## Running the Server
@@ -133,6 +137,37 @@ The server will be available at http://localhost:5000/mcp
    }
    ```
 
+   Get company news:
+   ```json
+   {
+     "jsonrpc": "2.0",
+     "id": 6,
+     "method": "tools/call",
+     "params": {
+       "name": "company_news",
+       "parameters": {
+         "symbol": "TSLA",
+         "days": 7
+       }
+     }
+   }
+   ```
+   
+   Analyze stock sentiment:
+   ```json
+   {
+     "jsonrpc": "2.0",
+     "id": 7,
+     "method": "tools/call",
+     "params": {
+       "name": "stock_sentiment",
+       "parameters": {
+         "symbol": "AAPL"
+       }
+     }
+   }
+   ```
+
    List available resources:
    ```json
    {
@@ -165,9 +200,42 @@ The server will be available at http://localhost:5000/mcp
    }
    ```
 
+## Using the Natural Language Interface
+
+This server includes a natural language endpoint that allows you to query stock information using plain English instead of structured JSON-RPC requests.
+
+1. Set up the OpenAI API key in your `.env` file
+2. Send a POST request to `/ask` endpoint:
+
+   Using JSON:
+   ```json
+   {
+     "query": "What's the current stock price for MGM?"
+   }
+   ```
+
+   Or plain text in the request body.
+
+3. The server will:
+   - Parse your natural language query
+   - Identify the stock symbol and required information
+   - Call the appropriate tool
+   - Return a formatted response
+
+Example queries:
+- "What's the current stock price for Apple?"
+- "Tell me about Microsoft as a company"
+- "What's the latest news for Tesla?"
+- "How is MGM stock performing today?"
+- "What's the market sentiment for Amazon stock?"
+- "How is the market feeling about Netflix?"
+- "Analyze the sentiment for Google stock"
+
 ## Understanding the Code
 
 - `server.py` - Main server implementation that handles MCP requests using Flask
+- `finnhub_api.py` - Client for Finnhub Stock API
+- `nlp_tools.py` - Helper functions for natural language processing
 - `.vscode/mcp.json` - Configuration for VS Code MCP client integration
 
 ## Additional Resources

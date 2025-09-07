@@ -14,6 +14,10 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 from flask import Flask, request, jsonify, Response
 from finnhub_api import FinnhubAPI
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -24,6 +28,23 @@ app = Flask(__name__)
 
 # Initialize Finnhub API client
 finnhub_client = FinnhubAPI()
+
+# Initialize OpenAI client if API key is available
+openai_api_key = os.getenv('OPENAI_API_KEY')
+if openai_api_key:
+    try:
+        from openai import OpenAI
+        llm_client = OpenAI(api_key=openai_api_key)
+        logger.info("OpenAI client initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing OpenAI client: {e}")
+        llm_client = None
+else:
+    logger.warning("OpenAI API key not found. Natural language processing will be unavailable.")
+    llm_client = None
+
+# Import NLP tool helpers
+from nlp_tools import tool_stock_quote, tool_company_profile, tool_company_news, tool_stock_sentiment
 
 # Store sessions
 sessions = {}
@@ -172,17 +193,26 @@ def handle_resources_read(params, request_id):
         }, indent=2)
         mime_type = 'application/json'
     elif uri == 'finnhub://data/stock-info.txt':
-        content = """This MCP server integrates with the Finnhub Stock API to provide real-time stock data.
+        content = """This MCP server integrates with the Finnhub Stock API to provide real-time stock data and analysis.
         
 Available stock tools:
 1. stock_quote - Get real-time quotes for a stock symbol
 2. company_profile - Get company information for a stock symbol
 3. company_news - Get recent news articles for a company
+4. stock_sentiment - Analyze sentiment and market perception about a stock
 
 Example usage:
 - Use the stock_quote tool with a symbol parameter (e.g., AAPL, MSFT, GOOG)
 - Use the company_profile tool to get detailed information about a company
 - Use the company_news tool to get recent news articles (optionally specify the number of days)
+- Use the stock_sentiment tool to analyze market sentiment and perception about a stock
+
+Natural Language Interface:
+This server also provides a natural language endpoint at /ask that allows you to:
+- Query stock prices in plain English (e.g., "What's the current price of Apple stock?")
+- Get company information (e.g., "Tell me about Microsoft")
+- Check recent news (e.g., "What's the latest news about Tesla?")
+- Analyze market sentiment (e.g., "What's the market sentiment for Amazon stock?")
 """
         mime_type = 'text/plain'
     else:
@@ -290,6 +320,21 @@ def handle_tools_list(params, request_id):
                     'days': {
                         'type': 'integer',
                         'description': 'Number of days of news to retrieve (default: 7)'
+                    }
+                },
+                'required': ['symbol']
+            }
+        },
+        {
+            'name': 'stock_sentiment',
+            'title': 'Stock Sentiment Analysis',
+            'description': 'Analyze sentiment and market perception about a stock',
+            'inputSchema': {
+                'type': 'object',
+                'properties': {
+                    'symbol': {
+                        'type': 'string',
+                        'description': 'Stock symbol (e.g., AAPL, MSFT, GOOG)'
                     }
                 },
                 'required': ['symbol']
@@ -438,6 +483,30 @@ def handle_tools_call(params, request_id):
                 'symbol': symbol,
                 'articles': formatted_news
             }
+        elif tool_name == 'stock_sentiment':
+            symbol = parameters.get('symbol')
+            if not symbol:
+                return jsonify({
+                    'jsonrpc': '2.0',
+                    'error': {
+                        'code': -32602,
+                        'message': 'Symbol is required'
+                    },
+                    'id': request_id
+                }), 400
+                
+            # Use our sentiment analysis tool
+            sentiment_data = tool_stock_sentiment({"symbol": symbol})
+            
+            result = {
+                'symbol': symbol,
+                'overallSentiment': sentiment_data.get('overallSentiment', 'neutral'),
+                'priceSentiment': sentiment_data.get('priceSentiment', 'neutral'),
+                'priceChange': sentiment_data.get('priceChange', 0),
+                'newsVolume': sentiment_data.get('newsVolume', 0),
+                'mediaInterest': sentiment_data.get('mediaInterest', 'low media interest'),
+                'analysisDate': sentiment_data.get('analysisDate', datetime.now().strftime("%Y-%m-%d"))
+            }
         else:
             return jsonify({
                 'jsonrpc': '2.0',
@@ -529,6 +598,239 @@ def handle_prompts_list(params, request_id):
         },
         'id': request_id
     })
+
+@app.route('/ask', methods=['POST'])
+def handle_natural_language():
+    """Handle natural language queries and convert them to tool calls"""
+    if not llm_client:
+        return jsonify({"error": "LLM processing is not available. Please set OPENAI_API_KEY in .env file."}), 500
+    
+    content_type = request.headers.get('Content-Type', '')
+    if content_type.startswith('application/json'):
+        query = request.json.get('query')
+    else:
+        query = request.data.decode('utf-8') or request.form.get('query')
+    
+    if not query:
+        return jsonify({"error": "No query provided. Please send a 'query' parameter."}), 400
+    
+    # Step 1: Use LLM to understand the query
+    try:
+        system_prompt = """You are an AI assistant that helps convert natural language queries about stocks into structured actions.
+        Available tools:
+        1. stock_quote - Gets current price info for a stock symbol. Use this when the user asks about current price, stock value, or how a stock is trading.
+        2. company_profile - Gets company information. Use this when the user asks about company details, what a company does, or company information.
+        3. company_news - Gets recent news about a company. Use this when the user asks about news, recent events, or articles about a company.
+        4. stock_sentiment - Analyzes sentiment and market perception about a stock. Use this when the user asks about sentiment, market feeling, perception, bullish/bearish outlook, or how the market views a stock.
+        
+        When the user asks about how the market is "feeling" about a stock or mentions "sentiment", "perception", "outlook", or "analysis", use the stock_sentiment tool.
+        
+        Extract the stock symbol and determine which tool to call."""
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": query}
+        ]
+        
+        response = llm_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=messages,
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_stock_quote",
+                        "description": "Get current stock price information",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "symbol": {
+                                    "type": "string",
+                                    "description": "The stock symbol (e.g., AAPL, MSFT)"
+                                }
+                            },
+                            "required": ["symbol"]
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_company_profile",
+                        "description": "Get company information",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "symbol": {
+                                    "type": "string",
+                                    "description": "The stock symbol (e.g., AAPL, MSFT)"
+                                }
+                            },
+                            "required": ["symbol"]
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_company_news",
+                        "description": "Get recent news about a company",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "symbol": {
+                                    "type": "string",
+                                    "description": "The stock symbol (e.g., AAPL, MSFT)"
+                                },
+                                "daysBack": {
+                                    "type": "integer",
+                                    "description": "How many days of news to retrieve"
+                                }
+                            },
+                            "required": ["symbol"]
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_stock_sentiment",
+                        "description": "Analyze sentiment and market perception about a stock",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "symbol": {
+                                    "type": "string",
+                                    "description": "The stock symbol (e.g., AAPL, MSFT)"
+                                }
+                            },
+                            "required": ["symbol"]
+                        }
+                    }
+                }
+            ],
+            tool_choice="auto"
+        )
+        
+        message = response.choices[0].message
+        
+        # Step 2: Call the appropriate tool based on LLM's understanding
+        if message.tool_calls and len(message.tool_calls) > 0:
+            tool_call = message.tool_calls[0]
+            function_name = tool_call.function.name
+            function_args = json.loads(tool_call.function.arguments)
+            
+            symbol = function_args.get('symbol', '').upper()
+            
+            if not symbol:
+                return jsonify({"error": "Could not determine stock symbol from query"}), 400
+            
+            if function_name == "get_stock_quote":
+                # Call the stock_quote tool
+                result = tool_stock_quote({"symbol": symbol})
+                
+                # Format the response in natural language
+                if "error" in result:
+                    return jsonify({"error": result["error"]}), 400
+                
+                response_text = f"""
+                Current information for {symbol}:
+                Price: ${result['currentPrice']:.2f}
+                Change: {result['change']:.2f} ({result['percentChange']:.2f}%)
+                Today's Range: ${result['lowOfDay']:.2f} - ${result['highOfDay']:.2f}
+                Opening Price: ${result['openPrice']:.2f}
+                Previous Close: ${result['previousClose']:.2f}
+                """
+                
+                return jsonify({
+                    "query": query,
+                    "response": response_text.strip(),
+                    "data": result
+                })
+                
+            elif function_name == "get_company_profile":
+                # Call the company_profile tool
+                result = tool_company_profile({"symbol": symbol})
+                
+                # Format the response in natural language
+                if "error" in result:
+                    return jsonify({"error": result["error"]}), 400
+                
+                response_text = f"""
+                Company Profile for {result.get('name', symbol)}:
+                Industry: {result.get('finnhubIndustry', 'N/A')}
+                Market Cap: ${result.get('marketCapitalization', 0)/1000:.2f} billion
+                Country: {result.get('country', 'N/A')}
+                Exchange: {result.get('exchange', 'N/A')}
+                IPO Date: {result.get('ipo', 'N/A')}
+                Website: {result.get('weburl', 'N/A')}
+                """
+                
+                return jsonify({
+                    "query": query,
+                    "response": response_text.strip(),
+                    "data": result
+                })
+                
+            elif function_name == "get_company_news":
+                # Call the company_news tool
+                days_back = function_args.get('daysBack', 7)
+                result = tool_company_news({"symbol": symbol, "daysBack": days_back})
+                
+                # Format the response in natural language
+                if "error" in result:
+                    return jsonify({"error": result["error"]}), 400
+                
+                news_items = result.get('news', [])
+                if not news_items:
+                    response_text = f"No recent news found for {symbol} in the past {days_back} days."
+                else:
+                    response_text = f"Recent news for {symbol} (past {days_back} days):\n\n"
+                    for i, news in enumerate(news_items[:5], 1):  # Show up to 5 news items
+                        headline = news.get('headline', 'No headline')
+                        source = news.get('source', 'Unknown source')
+                        url = news.get('url', '#')
+                        response_text += f"{i}. {headline} ({source})\n"
+                
+                return jsonify({
+                    "query": query,
+                    "response": response_text.strip(),
+                    "data": {"totalNews": len(news_items), "recentNews": news_items[:5]}
+                })
+                
+            elif function_name == "get_stock_sentiment":
+                # Call the stock_sentiment tool
+                result = tool_stock_sentiment({"symbol": symbol})
+                
+                # Format the response in natural language
+                if "error" in result:
+                    return jsonify({"error": result["error"]}), 400
+                
+                response_text = f"""
+                Sentiment Analysis for {symbol}:
+                Overall Market Sentiment: {result['overallSentiment']}
+                Price Sentiment: {result['priceSentiment']} (Change: {result['priceChange']:.2f}%)
+                Media Interest: {result['mediaInterest']} ({result['newsVolume']} recent news articles)
+                Analysis Date: {result['analysisDate']}
+                """
+                
+                return jsonify({
+                    "query": query,
+                    "response": response_text.strip(),
+                    "data": result
+                })
+        
+        # If no function call was made, return a generic response
+        return jsonify({
+            "query": query,
+            "response": "I couldn't determine what stock information you're looking for. Please specify a stock symbol and what information you need (price, company info, or news)."
+        })
+        
+    except Exception as e:
+        logger.error(f"Error processing natural language query: {e}")
+        return jsonify({
+            "error": f"Error processing query: {str(e)}"
+        }), 500
 
 if __name__ == '__main__':
     logger.info("Starting MCP server with Finnhub integration on http://localhost:5000/mcp")
