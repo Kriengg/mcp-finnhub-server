@@ -210,7 +210,7 @@ This server includes a natural language endpoint that allows you to query stock 
    Using JSON:
    ```json
    {
-     "query": "What's the current stock price for MGM?"
+     "query": "What's the current stock price for Tesla?"
    }
    ```
 
@@ -226,7 +226,7 @@ Example queries:
 - "What's the current stock price for Apple?"
 - "Tell me about Microsoft as a company"
 - "What's the latest news for Tesla?"
-- "How is MGM stock performing today?"
+- "How is Microsoft stock performing today?"
 - "What's the market sentiment for Amazon stock?"
 - "How is the market feeling about Netflix?"
 - "Analyze the sentiment for Google stock"
